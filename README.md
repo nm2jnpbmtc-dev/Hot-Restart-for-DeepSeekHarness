@@ -6,6 +6,10 @@
 
 > A Harness plugin that adds a green hot-restart button next to the composer send action and re-applies the profile on demand — no app restart.
 
+![发送键左侧的热重启按钮](screenshot.png)
+
+> 绿色圆形按钮（截图红框处）就在发送键左侧，点一下即热重启。
+
 ---
 
 ## 为什么需要它
