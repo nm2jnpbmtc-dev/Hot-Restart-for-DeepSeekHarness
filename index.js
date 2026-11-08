@@ -13,6 +13,10 @@
  * definition below is a plain JSON-Schema definition.
  */
 
+import { appendFileSync, mkdirSync, renameSync, statSync } from 'node:fs'
+import { homedir } from 'node:os'
+import { join } from 'node:path'
+
 export const name = 'hot-restart'
 export const inject = ['commands', 'tools']
 
@@ -20,6 +24,53 @@ const TOOL_NAME = 'hot_restart'
 const COMMAND_NAME = 'restart'
 /** Same-origin route the composer button POSTs to. */
 const ROUTE_PATH = '/hot-restart/run'
+/** Same-origin route the Client half reports a crashed button to. */
+const CLIENT_ERROR_PATH = '/hot-restart/client-error'
+
+/** Failure log. Nothing is written on a successful restart. */
+const LOG_DIR = join(process.env.DSH_HOME ?? join(homedir(), '.dsh'), 'logs')
+const LOG_FILE = join(LOG_DIR, 'hot-restart.log')
+const LOG_MAX_BYTES = 256 * 1024
+/** Messages already logged this run, so a crash loop does not flood the file. */
+const logged = new Set()
+
+/**
+ * Remove the machine-specific parts of a failure message: module URLs and
+ * absolute paths never reach the log, because users share it when reporting bugs.
+ * @param {unknown} value - error text.
+ * @returns {string} a path-free, length-bounded line.
+ */
+function redact(value) {
+  return String(value)
+    .replace(/file:\/\/\/\S+/gu, '<path>')
+    .replace(/[A-Za-z]:[\\/]\S+/gu, '<path>')
+    .replace(/\s+/gu, ' ')
+    .slice(0, 500)
+}
+
+/**
+ * Append one failure line. Best-effort: logging never breaks a restart.
+ * @param {string} scope - `host` or `client`.
+ * @param {string} status - outcome tag.
+ * @param {string} message - failure text.
+ */
+function logFailure(scope, status, message) {
+  const line = redact(`${scope} ${status} ${message}`)
+  if (logged.has(line)) return
+  logged.add(line)
+  if (logged.size > 200) logged.clear()
+  try {
+    mkdirSync(LOG_DIR, { recursive: true })
+    try {
+      if (statSync(LOG_FILE).size > LOG_MAX_BYTES) renameSync(LOG_FILE, `${LOG_FILE}.1`)
+    } catch {
+      // no previous log, or it cannot be rotated: appending is still useful
+    }
+    appendFileSync(LOG_FILE, `${new Date().toISOString()} ${line}\n`, 'utf8')
+  } catch {
+    // a read-only home must not break the restart
+  }
+}
 
 /**
  * One hot restart. Never throws: every outcome is data the command and tool can report.
@@ -30,9 +81,11 @@ async function hotRestart(ctx) {
   const startedAt = Date.now()
   const hmr = ctx.get('hmr')
   if (hmr === undefined) {
+    const message = '当前 Profile 没有启用 HMR（dsh-hmr），无法热重载插件；请重启应用来应用更改。'
+    logFailure('host', 'unavailable', message)
     return {
       status: 'unavailable',
-      message: '当前 Profile 没有启用 HMR（dsh-hmr），无法热重载插件；请重启应用来应用更改。',
+      message,
       reloadedPlugins: 0,
       pendingModules: [],
       warnings: [],
@@ -88,6 +141,7 @@ async function hotRestart(ctx) {
     }
   } catch (error) {
     const detail = error instanceof Error ? error.message : String(error)
+    logFailure('host', 'failed', detail)
     return {
       status: 'failed',
       message: `热重启失败：${detail}`,
@@ -183,13 +237,49 @@ export function apply(ctx) {
           response.end()
           return
         }
-        const result = await hotRestart(ctx)
-        response.writeHead(200, {
-          'content-type': 'application/json; charset=utf-8',
-          'cache-control': 'no-store',
-        })
-        response.end(JSON.stringify(result))
+        try {
+          const result = await hotRestart(ctx)
+          response.writeHead(200, {
+            'content-type': 'application/json; charset=utf-8',
+            'cache-control': 'no-store',
+          })
+          response.end(JSON.stringify(result))
+        } catch (error) {
+          const detail = error instanceof Error ? error.message : String(error)
+          logFailure('host', 'route', detail)
+          response.writeHead(500, { 'content-type': 'application/json; charset=utf-8' })
+          response.end(JSON.stringify({ status: 'failed', message: `热重启失败：${detail}` }))
+        }
       },
     }), 'hot-restart route')
+
+    // A crashed composer button is reported here, so a blank slot leaves a trace.
+    // Nothing is written when the button works.
+    web.effect(() => web.webServer.register({
+      kind: 'exact',
+      path: CLIENT_ERROR_PATH,
+      handler: async (request, response) => {
+        if (request.method !== 'POST') {
+          response.writeHead(405, { allow: 'POST' })
+          response.end()
+          return
+        }
+        let body = ''
+        for await (const chunk of request) {
+          body += chunk
+          if (body.length > 8192) break
+        }
+        let message = body
+        try {
+          const parsed = JSON.parse(body)
+          message = typeof parsed?.message === 'string' ? parsed.message : body
+        } catch {
+          // a non-JSON body is logged as-is
+        }
+        logFailure('client', 'crash', message)
+        response.writeHead(204, { 'cache-control': 'no-store' })
+        response.end()
+      },
+    }), 'hot-restart client error route')
   }), 'hot-restart route host')
 }

@@ -12,9 +12,31 @@ window.__ModuleLoader__.load({
     const h = React.createElement
 
     const ROUTE = '/hot-restart/run'
+    const CLIENT_ERROR_ROUTE = '/hot-restart/client-error'
     const IDLE_HINT = '热重启：重新应用配置并热重载改动过的插件'
     const SETTLE_MS = 2200
     const ERROR_MS = 4200
+
+    // Only failures reach the Host log: a working button writes nothing.
+    // Identical messages are reported once per page, so a crash loop cannot flood it.
+    const reported = new Set()
+    function reportClientError(message) {
+      try {
+        const text = String(message).slice(0, 500)
+        if (reported.has(text)) return
+        reported.add(text)
+        if (reported.size > 50) reported.clear()
+        fetch(CLIENT_ERROR_ROUTE, {
+          method: 'POST',
+          credentials: 'same-origin',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ message: text }),
+          keepalive: true,
+        }).catch(() => {})
+      } catch {
+        // reporting must never break the composer
+      }
+    }
 
     const STYLE = `
 .dsh-hot-restart {
@@ -37,6 +59,7 @@ window.__ModuleLoader__.load({
 .dsh-hot-restart[data-state='running'] svg { animation: dsh-hot-restart-spin 900ms linear infinite; }
 .dsh-hot-restart[data-state='error'] { background: var(--dsw-alias-state-error-primary); }
 .dsh-hot-restart[data-state='warn'] { background: var(--dsw-alias-state-warn-primary); }
+.dsh-hot-restart-crashed { background: var(--dsw-alias-state-idle-primary); cursor: default; }
 @keyframes dsh-hot-restart-spin { to { transform: rotate(360deg); } }
 @media (prefers-reduced-motion: reduce) {
   .dsh-hot-restart[data-state='running'] svg { animation: none; }
@@ -108,6 +131,7 @@ window.__ModuleLoader__.load({
           settle('done', result.message, SETTLE_MS)
         } catch (error) {
           const detail = error instanceof Error ? error.message : String(error)
+          reportClientError(`request ${detail}`)
           settle('error', `热重启请求失败：${detail}`, ERROR_MS)
         }
       }
@@ -129,6 +153,36 @@ window.__ModuleLoader__.load({
       )
     }
 
+    /**
+     * Keeps a render crash from blanking the slot entry silently: the failure is
+     * reported to the Host log and a muted glyph stays in place.
+     */
+    class ButtonBoundary extends React.Component {
+      constructor(props) {
+        super(props)
+        this.state = { crashed: false }
+      }
+
+      static getDerivedStateFromError() {
+        return { crashed: true }
+      }
+
+      componentDidCatch(error) {
+        const name = error !== null && typeof error === 'object' && typeof error.name === 'string' ? error.name : 'Error'
+        const message = error !== null && typeof error === 'object' && typeof error.message === 'string' ? error.message : String(error)
+        reportClientError(`render ${name}: ${message}`)
+      }
+
+      render() {
+        if (!this.state.crashed) return this.props.children
+        return h('span', {
+          className: 'dsh-hot-restart dsh-hot-restart-crashed',
+          title: '热重启按钮出错，已记录日志',
+          'aria-label': '热重启按钮出错',
+        }, errorGlyph)
+      }
+    }
+
     return {
       inject: ['slots'],
       apply(ctx) {
@@ -136,7 +190,7 @@ window.__ModuleLoader__.load({
           name: 'conversation.input.right',
           id: 'hot-restart',
           order: 20,
-        }, HotRestartButton))
+        }, () => h(ButtonBoundary, null, h(HotRestartButton))))
       },
     }
   },
