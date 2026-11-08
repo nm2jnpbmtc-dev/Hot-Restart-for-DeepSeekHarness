@@ -106,6 +106,13 @@ Hot-Restart-for-DeepSeekHarness/
 
 客户端改动仍需刷新浏览器页面（`F5`），因为浏览器有自己的模块图。
 
+## 更新日志
+
+见 [CHANGELOG.md](CHANGELOG.md)。
+
+- `1.0.1` — 修复重启 DSH 后按钮失效（红感叹号）的问题
+- `1.0.0` — 首个版本：按钮、`/restart` 命令、`hot_restart` 工具
+
 ## License
 
 MIT
