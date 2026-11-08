@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Hot restart",
+    "description": "Re-applies the Harness profile and hot-reloads plugins whose files changed, without restarting the app."
+  }
+}

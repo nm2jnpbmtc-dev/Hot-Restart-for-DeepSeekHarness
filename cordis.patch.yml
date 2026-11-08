@@ -1,0 +1,3 @@
+- insert:
+    - id: hot-restart
+      name: '@local/dsh-hot-restart'

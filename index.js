@@ -1,0 +1,191 @@
+/**
+ * Hot restart — Host half only.
+ *
+ * `ctx.hmr.reconcileProfile()` is the Harness' own reload path: it recomposes the
+ * profile from its manifest and patch files, replaces plugins whose loaded files
+ * changed on disk, and starts the stopped entries with the current files and
+ * configuration. Calling it on demand gives a hot restart of the plugin layer
+ * without restarting the process or the desktop window.
+ *
+ * The same operation is exposed twice: the `/restart` chat command for the user
+ * and the `hot_restart` tool for the model. The package imports nothing from the
+ * Harness runtime: a linked bundle resolves no runtime packages, so the tool
+ * definition below is a plain JSON-Schema definition.
+ */
+
+export const name = 'hot-restart'
+export const inject = ['commands', 'tools']
+
+const TOOL_NAME = 'hot_restart'
+const COMMAND_NAME = 'restart'
+/** Same-origin route the composer button POSTs to. */
+const ROUTE_PATH = '/hot-restart/run'
+
+/**
+ * One hot restart. Never throws: every outcome is data the command and tool can report.
+ * @param {import('@deepseek-ai/cordis').Context} ctx - the plugin context.
+ * @returns {Promise<{ status: 'reloaded' | 'unchanged' | 'restart_required' | 'unavailable' | 'failed', message: string, reloadedPlugins: number, pendingModules: string[], warnings: string[], elapsedMs: number }>}
+ */
+async function hotRestart(ctx) {
+  const startedAt = Date.now()
+  const hmr = ctx.get('hmr')
+  if (hmr === undefined) {
+    return {
+      status: 'unavailable',
+      message: '当前 Profile 没有启用 HMR（dsh-hmr），无法热重载插件；请重启应用来应用更改。',
+      reloadedPlugins: 0,
+      pendingModules: [],
+      warnings: [],
+      elapsedMs: 0,
+    }
+  }
+
+  let reloadedPlugins = 0
+  // `hmr/reload` is only emitted by the file-watch path, never by `reconcileProfile`,
+  // so the replacements are counted from the Loader entries themselves: a replaced
+  // module leaves a new `moduleNamespace` on its entry.
+  const loader = ctx.get('loader')
+  const snapshot = () => new Map(loader === undefined ? [] : [...loader.entries()].map((entry) => [entry.id, entry.moduleNamespace]))
+  const before = snapshot()
+
+  try {
+    // `reconcileProfile()` must run inside the HMR queue, which serializes it with
+    // file-watch reloads and Plugin Manager configuration writes.
+    const reconciliation = await hmr.runExclusive(() => hmr.reconcileProfile())
+    const after = snapshot()
+    for (const [id, namespace] of after) if (before.get(id) !== namespace) reloadedPlugins += 1
+    const pendingModules = Array.isArray(reconciliation?.pending)
+      ? reconciliation.pending.map((entry) => (typeof entry?.url === 'string' ? entry.url : String(entry?.url ?? entry)))
+      : []
+    const warnings = Array.isArray(reconciliation?.warnings) ? reconciliation.warnings.map(String) : []
+    const elapsedMs = Date.now() - startedAt
+    const report = { reloadedPlugins, pendingModules, warnings, elapsedMs }
+
+    if (reconciliation?.restartReason !== undefined || pendingModules.length > 0) {
+      const reason = reconciliation?.restartReason === 'package-moved'
+        ? '有插件包被移动了位置'
+        : reconciliation?.restartReason === 'module-comparison'
+          ? '有模块无法在进程内安全替换'
+          : '有模块属于进程级依赖'
+      const list = pendingModules.length > 0 ? `：${pendingModules.join('、')}` : ''
+      return {
+        status: 'restart_required',
+        message: `配置已重新应用，但${reason}，需要重启应用才能生效${list}`,
+        ...report,
+      }
+    }
+    if (reloadedPlugins > 0) {
+      return {
+        status: 'reloaded',
+        message: `热重启完成：重载了 ${reloadedPlugins} 个插件，用时 ${elapsedMs}ms。界面插件若有更新，请刷新页面。`,
+        ...report,
+      }
+    }
+    return {
+      status: 'unchanged',
+      message: `热重启完成：配置已重新应用，没有检测到文件改动（用时 ${elapsedMs}ms）。`,
+      ...report,
+    }
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error)
+    return {
+      status: 'failed',
+      message: `热重启失败：${detail}`,
+      reloadedPlugins,
+      pendingModules: [],
+      warnings: [],
+      elapsedMs: Date.now() - startedAt,
+    }
+  }
+}
+
+/**
+ * Register the `/restart` command, the `hot_restart` tool, and the Web route the
+ * composer button calls.
+ * @param {import('@deepseek-ai/cordis').Context} ctx - the plugin context.
+ */
+export function apply(ctx) {
+  ctx.effect(() => ctx.commands.register({
+    name: COMMAND_NAME,
+    description: '热重启：重新应用 Profile 配置并热重载文件已改动的插件（不重启进程）',
+    handler: async () => {
+      const result = await hotRestart(ctx)
+      return result.status === 'failed' || result.status === 'unavailable'
+        ? { kind: 'error', text: result.message }
+        : { kind: 'success', text: result.message }
+    },
+  }), 'hot-restart command')
+
+  ctx.effect(() => ctx.tools.register({
+    name: TOOL_NAME,
+    description: 'Hot-restart the Harness: re-apply the profile composition and reload plugins whose loaded files changed on disk, without restarting the process or the app window. Use it after installing, updating, or editing a plugin or the profile patch when the change must take effect now. It cannot restart the process; a change that needs a process-level restart is reported as `restart_required`.',
+    parameters: {
+      type: 'object',
+      properties: {},
+      additionalProperties: false,
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['status', 'message', 'reloadedPlugins', 'pendingModules', 'warnings', 'elapsedMs'],
+        properties: {
+          status: {
+            type: 'string',
+            enum: ['reloaded', 'unchanged', 'restart_required', 'unavailable', 'failed'],
+            description: 'What the reconciliation settled as.',
+          },
+          message: {
+            type: 'string',
+            description: 'Human-readable outcome for the user.',
+          },
+          reloadedPlugins: {
+            type: 'integer',
+            description: 'How many plugin modules were replaced during this run.',
+          },
+          pendingModules: {
+            type: 'array',
+            items: { type: 'string' },
+            description: 'Module URLs whose change only takes effect after a process restart.',
+          },
+          warnings: {
+            type: 'array',
+            items: { type: 'string' },
+            description: 'Reconciliation warnings.',
+          },
+          elapsedMs: {
+            type: 'integer',
+            description: 'Wall-clock duration of the run.',
+          },
+        },
+      },
+      render: (_args, value) => [{ type: 'text', text: value.message }],
+    },
+    execute: () => hotRestart(ctx),
+    presentCall: () => ({ card: 'generic', title: 'Hot restart', kind: 'other', rawInput: {} }),
+  }), 'hot-restart tool')
+
+  // The composer button (Client half) reaches this Host half over the page's own
+  // HTTP carrier: a linked bundle gets no generated Client→Host RPC, and the page
+  // is served from this same origin.
+  const webServer = ctx.get('webServer')
+  if (webServer !== undefined) {
+    ctx.effect(() => webServer.register({
+      kind: 'exact',
+      path: ROUTE_PATH,
+      handler: async (request, response) => {
+        if (request.method !== 'POST') {
+          response.writeHead(405, { allow: 'POST' })
+          response.end()
+          return
+        }
+        const result = await hotRestart(ctx)
+        response.writeHead(200, {
+          'content-type': 'application/json; charset=utf-8',
+          'cache-control': 'no-store',
+        })
+        response.end(JSON.stringify(result))
+      },
+    }), 'hot-restart route')
+  }
+}
