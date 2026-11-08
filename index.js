@@ -168,9 +168,13 @@ export function apply(ctx) {
   // The composer button (Client half) reaches this Host half over the page's own
   // HTTP carrier: a linked bundle gets no generated Client→Host RPC, and the page
   // is served from this same origin.
-  const webServer = ctx.get('webServer')
-  if (webServer !== undefined) {
-    ctx.effect(() => webServer.register({
+  //
+  // At boot this plugin starts before the `webServer` service exists, so the route
+  // is registered from an injected child context that activates when the service
+  // appears. Reading `ctx.get('webServer')` once during `apply()` left the route
+  // unregistered after every restart.
+  ctx.effect(() => ctx.inject(['webServer'], (web) => {
+    web.effect(() => web.webServer.register({
       kind: 'exact',
       path: ROUTE_PATH,
       handler: async (request, response) => {
@@ -187,5 +191,5 @@ export function apply(ctx) {
         response.end(JSON.stringify(result))
       },
     }), 'hot-restart route')
-  }
+  }), 'hot-restart route host')
 }
