@@ -1,10 +1,10 @@
-# DSH Hot Restart
+# Hot Restart for DeepSeek Harness
 
 **改完插件代码或配置，不用关闭 DeepSeek Harness 就能生效。**
 
 一个 [DeepSeek Harness](https://harness.deepseek.com) 插件：在聊天输入框的发送键左侧加一个绿色圆形按钮，点一下即触发一次 Profile 重组与插件热重载。
 
-English: a Harness plugin that adds a green hot-restart button next to the composer send action and re-applies the profile on demand — no app restart.
+> A Harness plugin that adds a green hot-restart button next to the composer send action and re-applies the profile on demand — no app restart.
 
 ---
 
@@ -18,15 +18,20 @@ English: a Harness plugin that adds a green hot-restart button next to the compo
 
 ## 安装
 
-这是一个本地 bundle（文件链接安装，不进 npm）：
+前置条件：DSH 0.2.x；Profile 已启用 HMR（Web 与 Desktop 的默认 Profile 都启用，`dsh-hmr` 处于激活状态）。
 
+```bash
+git clone https://github.com/nm2jnpbmtc-dev/Hot-Restart-for-DeepSeekHarness.git
 ```
-dsh plugin install <本目录绝对路径>
-```
 
-或在 Harness 的插件管理里安装目录 `hot-restart`。
+然后在 Harness 里二选一：
 
-安装后无需重启：插件行会立即激活。
+- **图形界面**：设置 → 插件 → 安装本地插件，选择上面克隆下来的目录。
+- **让 Agent 装**：对它说"用 plugin_manager 安装这个目录"，即 `install_bundle`，`target` 填该目录的绝对路径。
+
+> 不要只用 `pnpm add` 手动装：那样只会把包装进 Profile 的 `node_modules`，还需要把它加进 Profile 的 bundle 列表才会被激活。`install_bundle` 会一起做完。
+
+装好后无需重启进程，插件行会立即激活。验证：聊天框输入 `/` 能看到「重启」这一项，且发送键左侧出现绿色按钮。
 
 ## 用法
 
@@ -34,11 +39,9 @@ dsh plugin install <本目录绝对路径>
 
 | 入口 | 说明 |
 | --- | --- |
-| **绿色圆形按钮** | 输入框发送键左侧。图标旋转＝进行中，对勾＝完成，感叹号＝失败／需要重启。悬停可看本次结果。 |
+| **绿色圆形按钮** | 输入框发送键左侧。图标旋转＝进行中，对勾＝完成，感叹号＝失败，琥珀色＝需要重启进程。悬停可看本次结果。 |
 | `/restart` 命令 | 在聊天框输入，结果作为命令行出现在会话里。 |
-| `hot_restart` 工具 | Agent 可调用（装完插件后让 Agent 立刻生效）。 |
-
-按钮状态颜色：绿＝正常，红＝失败/不可用，琥珀＝需要重启进程。
+| `hot_restart` 工具 | Agent 可调用。例如装完插件后让 Agent 立即让它生效。 |
 
 ## 它做了什么
 
@@ -62,9 +65,9 @@ await hmr.runExclusive(() => hmr.reconcileProfile())
 | Profile / home 的 `cordis.patch.yml` | ✅ |
 | 插件启停、bundle 增删 | ✅ |
 | Profile 内 `node_modules` 就地更新的包 | ✅ |
-| 改了插件的 `package.json` | ❌ 需重启（HMR 不检测 manifest） |
+| 改了插件的 `package.json` | ❌ 需重启（HMR 不检测 manifest 变更） |
 | 插件牵进了 DSH 框架包（app-boot / Cordis / Loader） | ❌ 进程级依赖 |
-| 插件包被移动位置 | ❌ `package-moved` |
+| 插件包被移动位置 | ❌ 返回 `package-moved` |
 | 只改客户端半（`client.js`） | 部分：host 已换，浏览器刷新页面即可 |
 
 需要重启的情况会如实返回 `restart_required`，不会假装成功。
@@ -72,22 +75,32 @@ await hmr.runExclusive(() => hmr.reconcileProfile())
 ## 已知边界
 
 - **不会重启进程**。桌面壳没有向页面暴露"重启 Host"的接口，进程级改动只能手动重启应用。
-- 客户端插件的新增 `dsh.client` 条目需要刷新页面才会进入 boot graph。
+- 客户端插件新增的 `dsh.client` 条目需要刷新页面才会进入 boot graph。
 - 按钮注册在 `conversation.input.right`（发送键前的紧凑控件位），与发送键同一行；进程内悬浮定位会在窗口尺寸变化时错位，因此未采用。
+
+## 卸载
+
+在 Harness 的插件管理里移除该 bundle（或 `plugin_manager` 的 `remove_bundle`），随后删除克隆下来的目录即可。
 
 ## 目录结构
 
 ```
-hot-restart/
-├── cordis.patch.yml   # bundle 的 Loader 补丁（插入 hot-restart 行）
-├── index.js           # Host 半：/restart 命令、hot_restart 工具、POST 路由
-├── client.js          # Client 半：发送键旁的绿色按钮
-├── package.json       # dsh.bundle.patch + dsh.client 清单
-├── locale/{en,zh}.json# 插件管理页显示名与描述
-├── icon.svg           # 插件图标
+Hot-Restart-for-DeepSeekHarness/
+├── cordis.patch.yml    # bundle 的 Loader 补丁（插入 hot-restart 行）
+├── index.js            # Host 半：/restart 命令、hot_restart 工具、POST 路由
+├── client.js           # Client 半：发送键旁的绿色按钮
+├── package.json        # dsh.bundle.patch + dsh.client 清单
+├── locale/{en,zh}.json # 插件管理页的显示名与描述
+├── icon.svg            # 插件图标
 ├── LICENSE
 └── README.md
 ```
+
+## 开发
+
+改完 `index.js` 或 `client.js` 想立即生效，点那个绿色按钮就行——它本来就是为了解决这个循环做的。
+
+客户端改动仍需刷新浏览器页面（`F5`），因为浏览器有自己的模块图。
 
 ## License
 
